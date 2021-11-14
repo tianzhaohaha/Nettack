@@ -20,7 +20,7 @@ def load_npz(file_name):
     if not file_name.endswith('.npz'):
         file_name += '.npz'
     with np.load(file_name) as loader:
-        loader = dict(loader)
+        loader = dict(loader)#对于原始数据，构造一个字典，以下内容为提取此字典中的数据
         adj_matrix = sp.csr_matrix((loader['adj_data'], loader['adj_indices'],
                                               loader['adj_indptr']), shape=loader['adj_shape'])
 
@@ -52,15 +52,15 @@ def largest_connected_components(adj, n_components=1):
 
     """
     _, component_indices = connected_components(adj)
-    component_sizes = np.bincount(component_indices)
-    components_to_keep = np.argsort(component_sizes)[::-1][:n_components]  # reverse order to sort descending
+    component_sizes = np.bincount(component_indices)#参数比重比例数列
+    components_to_keep = np.argsort(component_sizes)[::-1][:n_components]  # reverse order to sort descending#记住最大数的比重
     nodes_to_keep = [
         idx for (idx, component) in enumerate(component_indices) if component in components_to_keep
 
 
-    ]
+    ]#将最大数在矩阵中保留下来
     print("Selecting {0} largest connected components".format(n_components))
-    return nodes_to_keep
+    return nodes_to_keep#len=2110
 
 
 def train_val_test_split_tabular(*arrays, train_size=0.5, val_size=0.3, test_size=0.2, stratify=None, random_state=None):
@@ -112,7 +112,7 @@ def train_val_test_split_tabular(*arrays, train_size=0.5, val_size=0.3, test_siz
     return result
 
 def preprocess_graph(adj):
-    adj_ = adj + sp.eye(adj.shape[0])
+    adj_ = adj + sp.eye(adj.shape[0])#加上对角矩阵
     rowsum = adj_.sum(1).A1
     degree_mat_inv_sqrt = sp.diags(np.power(rowsum, -0.5))
     adj_normalized = adj_.dot(degree_mat_inv_sqrt).T.dot(degree_mat_inv_sqrt).tocsr()

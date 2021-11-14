@@ -11,7 +11,7 @@ Technical University of Munich
 
 import numpy as np
 import scipy.sparse as sp
-from nettack import utils
+from nettack_0 import utils
 from numba import jit
 
 class Nettack:
@@ -22,21 +22,26 @@ class Nettack:
     Technical University of Munich
     """
 
-    def __init__(self, adj, X_obs, z_obs, W1, W2, u, verbose=False):
+    def __init__(self, R,adj, X_obs, z_obs, W1, W2, u, verbose=False):
+        self.R = R
+        self.alpha=0
 
         # Adjacency matrix
         self.adj = adj.copy().tolil()
+        self.adj_copy=adj.copy().tolil()
         self.adj_no_selfloops = self.adj.copy()
         self.adj_no_selfloops.setdiag(0)
         self.adj_orig = self.adj.copy().tolil()
         self.u = u  # the node being attacked
         self.adj_preprocessed = utils.preprocess_graph(self.adj).tolil()
+        self.adj_preprocessed_copy = utils.preprocess_graph(self.adj).tolil()
         # Number of nodes
         self.N = adj.shape[0]
 
         # Node attributes
         self.X_obs = X_obs.copy().tolil()
         self.X_obs_orig = self.X_obs.copy().tolil()
+        self.X_obs_copy=X_obs.copy().tolil()
         # Node labels
         self.z_obs = z_obs.copy()
         self.label_u = self.z_obs[self.u]
@@ -44,10 +49,11 @@ class Nettack:
         # GCN weight matrices
         self.W1 = W1
         self.W2 = W2
+        #这两个权重代表的是第一层和第二层参数
         self.W = sp.csr_matrix(self.W1.dot(self.W2))
 
-        self.cooc_matrix = self.X_obs.T.dot(self.X_obs).tolil()
-        self.cooc_constraint = None
+        self.cooc_matrix = self.X_obs.T.dot(self.X_obs).tolil()#这一步？
+        self.cooc_constraint = True
 
         self.structure_perturbations = []
         self.feature_perturbations = []
@@ -72,17 +78,17 @@ class Nettack:
             we are allowed to add feature d to the features of node n.
 
         """
-
-        words_graph = self.cooc_matrix.copy()
-        D = self.X_obs.shape[1]
+        #这个constraint若想保持基于未updated graph的话。就要看下面是否对cooc_matrix与X_obs改动
+        words_graph = self.cooc_matrix.copy()#self.X_obs.T.dot(self.X_obs).tolil()
+        D = self.X_obs.shape[1]#attr_matrix
         words_graph.setdiag(0)
         words_graph = (words_graph > 0)
         word_degrees = np.sum(words_graph, axis=0).A1
 
-        inv_word_degrees = np.reciprocal(word_degrees.astype(float) + 1e-8)
+        inv_word_degrees = np.reciprocal(word_degrees.astype(float) + 1e-8)#np.reciprocal返回参数元素的倒数
 
         sd = np.zeros([self.N])
-        for n in range(self.N):
+        for n in range(self.N):# Number of nodes
             n_idx = self.X_obs[n, :].nonzero()[1]
             sd[n] = np.sum(inv_word_degrees[n_idx.tolist()])
 
@@ -151,10 +157,10 @@ class Nettack:
 
         if self.cooc_constraint is None:
             self.compute_cooccurrence_constraint(self.influencer_nodes)
-        logits = self.compute_logits()
-        best_wrong_class = self.strongest_wrong_class(logits)
+        logits = self.compute_logits()#(AXW)#包含归一化后的邻接矩阵
+        best_wrong_class = self.strongest_wrong_class(logits)##?
         gradient = self.gradient_wrt_x(self.label_u) - self.gradient_wrt_x(best_wrong_class)
-        surrogate_loss = logits[self.label_u] - logits[best_wrong_class]
+        surrogate_loss = logits[self.label_u] - logits[best_wrong_class]#loss function
 
         gradients_flipped = (gradient * -1).tolil()
         gradients_flipped[self.X_obs.nonzero()] *= -1
@@ -171,7 +177,7 @@ class Nettack:
         scores = surrogate_loss - grads
         return sorted_ixs[::-1], scores.A1[::-1]
 
-    def struct_score(self, a_hat_uv, XW):
+    def struct_score(self, a_hat_uv, XW):#XW会不会变化？这里说明了A不会变化
         """
         Compute structure scores, cf. Eq. 15 in the paper
 
@@ -267,7 +273,7 @@ class Nettack:
                 additional_struct_scores = self.struct_score(a_hat_uv_additional, XW)
                 additional_influencers = poss_add_infl[np.argsort(additional_struct_scores)[-n_additional_attackers::]]
 
-                return influencer_nodes, additional_influencers
+                return influencer_nodes, additional_influencers[:,0]
             else:
                 return influencer_nodes
 
@@ -300,6 +306,85 @@ class Nettack:
         a_hat_uv = sp.coo_matrix((vals, (ixs_arr[:, 0], ixs_arr[:, 1])), shape=[len(potential_edges), self.N])
 
         return a_hat_uv
+
+    def Random_select_perturbation_struc(self):
+        """
+        Randomly select perturbstions from gpraph
+        author: Qingyuan Liu
+        :return:
+        adj_random_selected: np.array
+
+        """
+        if len(self.structure_perturbations)==0:
+            return self.adj_copy
+
+        select_num=int(len(self.structure_perturbations)/2)+1
+        select_idx=np.random.choice(len(self.structure_perturbations),select_num,replace=False)
+        adj_random_selected = self.adj_copy.copy()
+        print("random select perturbation is:")
+        for i in select_idx:
+            adj_random_selected[self.structure_perturbations[i]] = 1 - self.adj_copy[self.structure_perturbations[i]]
+            adj_random_selected[self.structure_perturbations[i][::-1]] = 1 - self.adj_copy[self.structure_perturbations[i]]
+            print(self.structure_perturbations[i])
+        return adj_random_selected
+
+
+    def ll_struc_defference(self):
+        """
+        calculate difference between real likelihood ratio and adj_random_selected likelihood ratio
+        author: Qingyuan Liu
+        :return:
+        difference: int
+        """
+        adj_random_selected = self.Random_select_perturbation_struc()#从目前的copy矩阵开始下手
+
+        # Setup starting values of the likelihood ratio test.
+        degree_sequence_start = self.adj_orig.sum(0).A1
+        current_degree_sequence = self.adj_orig.sum(0).A1
+        d_min = 2
+        S_d_start = np.sum(np.log(degree_sequence_start[degree_sequence_start >= d_min]))
+        current_S_d = np.sum(np.log(current_degree_sequence[current_degree_sequence >= d_min]))
+        n_start = np.sum(degree_sequence_start >= d_min)
+        current_n = np.sum(current_degree_sequence >= d_min)
+        alpha_start = compute_alpha(n_start, S_d_start, d_min)
+        log_likelihood_orig = compute_log_likelihood(n_start, alpha_start, S_d_start, d_min)
+
+        #Compute adj_random_selected likelihood
+        singleton_filter = filter_singletons(self.potential_edges,adj_random_selected)
+        filtered_edges = self.potential_edges[singleton_filter]
+        deltas = 2 * (1 - adj_random_selected[tuple(filtered_edges.T)].toarray()[0]) - 1
+        d_edges_old = current_degree_sequence[filtered_edges]
+        d_edges_new = current_degree_sequence[filtered_edges] + deltas[:, None]
+        new_S_d, new_n = update_Sx(current_S_d, current_n, d_edges_old, d_edges_new, d_min)
+        new_alphas = compute_alpha(new_n, new_S_d, d_min)
+        new_ll = compute_log_likelihood(new_n, new_alphas, new_S_d, d_min)
+        alphas_combined = compute_alpha(new_n + n_start, new_S_d + S_d_start, d_min)
+        new_ll_combined = compute_log_likelihood(new_n + n_start, alphas_combined, new_S_d + S_d_start, d_min)
+        random_selected_ratios = -2 * new_ll_combined + 2 * (new_ll + log_likelihood_orig)
+
+
+        # Compute corrent real likelihood ratio
+        singleton_filter_r = filter_singletons(self.potential_edges, self.adj_copy)
+        filtered_edges_r = self.potential_edges[singleton_filter_r]
+        deltas_r = 2 * (1 - self.adj_copy[tuple(filtered_edges_r.T)].toarray()[0]) - 1
+        d_edges_old_r = current_degree_sequence[filtered_edges_r]
+        d_edges_new_r = current_degree_sequence[filtered_edges_r] + deltas_r[:, None]
+        new_S_d_r, new_n_r = update_Sx(current_S_d, current_n, d_edges_old_r, d_edges_new_r, d_min)
+        new_alphas_r = compute_alpha(new_n_r, new_S_d_r, d_min)
+        new_ll_r = compute_log_likelihood(new_n_r, new_alphas_r, new_S_d_r, d_min)
+        alphas_combined_r = compute_alpha(new_n_r + n_start, new_S_d_r + S_d_start, d_min)
+        new_ll_combined_r = compute_log_likelihood(new_n_r + n_start, alphas_combined_r, new_S_d_r + S_d_start, d_min)
+        real_ratios_r = -2 * new_ll_combined_r + 2 * (new_ll_r + log_likelihood_orig)
+
+        #print(self.adj_copy.shape)
+        #print(adj_random_selected.shape)
+        #print((self.adj_copy.todense()==adj_random_selected.todense()).all())
+        #print((real_ratios_r==random_selected_ratios).all())
+        #print("real_ratios",real_ratios_r[self.structure_perturbations[len(self.structure_perturbations)-1][1]-1])
+        #print("random_selected_ratios",random_selected_ratios[self.structure_perturbations[len(self.structure_perturbations)-1][1]-1])
+        self.alpha = (random_selected_ratios[self.structure_perturbations[len(self.structure_perturbations)-1][1]-1]-real_ratios_r[self.structure_perturbations[len(self.structure_perturbations)-1][1]-1])*1000
+        print("likelyhood between random selected graph and real graph is: ",random_selected_ratios[self.structure_perturbations[len(self.structure_perturbations)-1][1]-1]-real_ratios_r[self.structure_perturbations[len(self.structure_perturbations)-1][1]-1])
+
 
     def attack_surrogate(self, n_perturbations, perturb_structure=True, perturb_features=True,
                          direct=True, n_influencers=0, delta_cutoff=0.004):
@@ -344,6 +429,7 @@ class Nettack:
 
         if self.verbose:
             print("##### Starting attack #####")
+            print("####score function will update every {}-th time####".format(self.R))
             if perturb_structure and perturb_features:
                 print("##### Attack node with ID {} using structure and feature perturbations #####".format(self.u))
             elif perturb_features:
@@ -401,7 +487,9 @@ class Nettack:
                 deltas = 2 * (1 - self.adj[tuple(filtered_edges.T)].toarray()[0] )- 1
                 d_edges_old = current_degree_sequence[filtered_edges]
                 d_edges_new = current_degree_sequence[filtered_edges] + deltas[:, None]
+
                 new_S_d, new_n = update_Sx(current_S_d, current_n, d_edges_old, d_edges_new, d_min)
+
                 new_alphas = compute_alpha(new_n, new_S_d, d_min)
                 new_ll = compute_log_likelihood(new_n, new_alphas, new_S_d, d_min)
                 alphas_combined = compute_alpha(new_n + n_start, new_S_d + S_d_start, d_min)
@@ -444,12 +532,25 @@ class Nettack:
 
             if change_structure:
                 # perform edge perturbation
+                #origin code here
+                '''self.adj[tuple(best_edge)] = self.adj[tuple(best_edge[::-1])] = 1 - self.adj[tuple(best_edge)]
+                self.adj_preprocessed = utils.preprocess_graph(self.adj)'''
 
-                self.adj[tuple(best_edge)] = self.adj[tuple(best_edge[::-1])] = 1 - self.adj[tuple(best_edge)]
-                self.adj_preprocessed = utils.preprocess_graph(self.adj)
+                ####weak connection perturbation
+
+                if (_%self.R)!=0:#对score function改为4round一次
+                    self.adj_copy[tuple(best_edge)] = self.adj_copy[tuple(best_edge[::-1])] = 1 - self.adj_copy[tuple(best_edge)]
+                    self.adj_preprocessed_copy = utils.preprocess_graph(self.adj_copy)
+                else:
+                    self.adj[tuple(best_edge)] = self.adj_copy[tuple(best_edge[::-1])] = 1 - self.adj_copy[tuple(best_edge)]
+                    self.adj_preprocessed = utils.preprocess_graph(self.adj)
+                    self.adj_copy=self.adj
+                    self.adj_preprocessed_copy=self.adj_preprocessed
+
 
                 self.structure_perturbations.append(tuple(best_edge))
                 self.feature_perturbations.append(())
+                self.ll_struc_defference()
                 surrogate_losses.append(best_edge_score)
 
                 # Update likelihood ratio test values
@@ -458,7 +559,13 @@ class Nettack:
                 current_degree_sequence[best_edge] += deltas[powerlaw_filter][best_edge_ix]
 
             else:
-                self.X_obs[tuple(best_feature_ix)] = 1 - self.X_obs[tuple(best_feature_ix)]
+                #origin code
+                """self.X_obs[tuple(best_feature_ix)] = 1 - self.X_obs[tuple(best_feature_ix)]"""
+                if (_%4)!=0:
+                    self.X_obs_copy[tuple(best_feature_ix)] = 1 - self.X_obs_copy[tuple(best_feature_ix)]
+                else:
+                    self.X_obs[tuple(best_feature_ix)] = 1 - self.X_obs_copy[tuple(best_feature_ix)]
+
 
                 self.feature_perturbations.append(tuple(best_feature_ix))
                 self.structure_perturbations.append(())
@@ -531,7 +638,7 @@ def compute_new_a_hat_uv(edge_ixs, node_nb_ixs, edges_set, twohop_ixs, values_be
 
     for ix in range(len(potential_edges)):
         edge = potential_edges[ix]
-        edge_set = set(edge)
+        edge_set = set(edge.astype(np.int64))
         degs_new = degs.copy()
         delta = -2 * ((edge[0], edge[1]) in edges_set) + 1
         degs_new[edge] += delta
@@ -539,7 +646,7 @@ def compute_new_a_hat_uv(edge_ixs, node_nb_ixs, edges_set, twohop_ixs, values_be
         nbs_edge0 = edge_ixs[edge_ixs[:, 0] == edge[0], 1]
         nbs_edge1 = edge_ixs[edge_ixs[:, 0] == edge[1], 1]
 
-        affected_nodes = set(np.concatenate((twohop_u, nbs_edge0, nbs_edge1)))
+        affected_nodes = set(np.concatenate((twohop_u, nbs_edge0, nbs_edge1)).astype(np.int64))
         affected_nodes = affected_nodes.union(edge_set)
         a_um = edge[0] in nbs_u_set
         a_un = edge[1] in nbs_u_set
